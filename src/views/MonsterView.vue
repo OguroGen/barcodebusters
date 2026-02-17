@@ -572,7 +572,7 @@ const victory = () => {
   attackButton.value.hidden = true;
 
   let nextLevel = monsterStore.currentLevel + 1;
-  if (nextLevel > 5) nextLevel = 1;
+  if (nextLevel > 7) nextLevel = 1;
   monsterStore.currentLevel = nextLevel;
   startCaption.value = "レベル" + nextLevel + "へ";
   startButton.value.hidden = false;
