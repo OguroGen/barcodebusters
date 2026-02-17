@@ -713,15 +713,15 @@ const playSound = (sound) => {
   word-break: break-all;
 }
 .member-icon {
-  width: 80px;
-  height: 80px;
+  width: 100%;
+  aspect-ratio: 1;
   object-fit: contain;
   display: block;
   margin-bottom: 0.5rem;
 }
 .member-icon-placeholder {
-  width: 80px;
-  height: 80px;
+  width: 100%;
+  aspect-ratio: 1;
   display: flex;
   align-items: center;
   justify-content: center;
