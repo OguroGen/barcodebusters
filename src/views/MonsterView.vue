@@ -58,6 +58,7 @@ const kaishinCardCount = ref(0);
 const memberError = ref("");
 const answerMode = ref(false);
 const afterAttackOrMiss = ref(false);
+const answerSubmitted = ref(false); // 答え入力後はアイテム・会心ボタンを無効化
 
 //変数、配列
 let game;
@@ -166,7 +167,7 @@ const resetMember = () => {
 
 // アイテムカードをボタンで使用（残数あり＆アタックボーナス64未満のときだけ押せる）
 const useItemCard = () => {
-  if (!hasMember.value || itemCardCount.value <= 0 || attackBonus.value >= 64) return;
+  if (!hasMember.value || itemCardCount.value <= 0 || attackBonus.value >= 64 || answerSubmitted.value) return;
   itemCardCount.value--;
   attackBonus.value *= 2;
   playSound(itemCardSound);
@@ -175,7 +176,7 @@ const useItemCard = () => {
 
 // 会心の一撃確率アップカードをボタンで使用（残数あり＆会心レート10未満のときだけ押せる）
 const useKaishinCard = () => {
-  if (!hasMember.value || kaishinCardCount.value <= 0 || kaishinRate.value >= 10) return;
+  if (!hasMember.value || kaishinCardCount.value <= 0 || kaishinRate.value >= 10 || answerSubmitted.value) return;
   kaishinCardCount.value--;
   kaishinRate.value += 3;
   playSound(kaishinRateSound);
@@ -252,6 +253,7 @@ const barcodeButtonClick = () => {
     resetMember();
     afterAttackOrMiss.value = false;
   }
+  answerSubmitted.value = false;
   varInit();
   inputInit();
   barcodeInput.value.focus();
@@ -283,6 +285,7 @@ const barcodeInputBlur = async () => {
 
   const initialLetter = barcode.value.slice(0, 1);
   if (initialLetter === "S") {
+    answerSubmitted.value = false; // 新しい問題なのでカード使用可能に
     answerInput.value.disabled = false;
     answerInput.value.focus();
     answerMode.value = true;
@@ -311,6 +314,7 @@ const barcodeInputBlur = async () => {
 
 //答えインプット（問題の答えのみ）
 const answerInputBlur = () => {
+  answerSubmitted.value = true; // 正解・不正解どちらでも答え入力後はカード使用不可
   if (inputedAnswer.value == correctAnswer) {
     hantei.value = "せいか～い";
     attackButton.value.hidden = false;
@@ -605,8 +609,8 @@ const playSound = (sound) => {
       <button
         type="button"
         class="btn btn-sm mt-1"
-        :class="hasMember && itemCardCount > 0 && attackBonus < 64 ? 'btn-warning' : 'btn-outline-secondary'"
-        :disabled="!hasMember || itemCardCount <= 0 || attackBonus >= 64"
+        :class="hasMember && itemCardCount > 0 && attackBonus < 64 && !answerSubmitted ? 'btn-warning' : 'btn-outline-secondary'"
+        :disabled="!hasMember || itemCardCount <= 0 || attackBonus >= 64 || answerSubmitted"
         @click="useItemCard"
       >
         アイテムカードを使う
@@ -618,8 +622,8 @@ const playSound = (sound) => {
       <button
         type="button"
         class="btn btn-sm mt-1"
-        :class="hasMember && kaishinCardCount > 0 && kaishinRate < 10 ? 'btn-info' : 'btn-outline-secondary'"
-        :disabled="!hasMember || kaishinCardCount <= 0 || kaishinRate >= 10"
+        :class="hasMember && kaishinCardCount > 0 && kaishinRate < 10 && !answerSubmitted ? 'btn-info' : 'btn-outline-secondary'"
+        :disabled="!hasMember || kaishinCardCount <= 0 || kaishinRate >= 10 || answerSubmitted"
         @click="useKaishinCard"
       >
         会心アップを使う
