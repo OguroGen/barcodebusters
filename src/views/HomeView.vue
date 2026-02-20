@@ -3,7 +3,7 @@
     const router=useRouter()
 
     const start=()=>{
-        document.body.requestFullscreen()
+        // document.body.requestFullscreen()
         router.push('/menu')       
     }
 </script>
