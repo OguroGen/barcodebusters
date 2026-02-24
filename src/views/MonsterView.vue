@@ -123,7 +123,9 @@ const fetchMemberBySeitoId = async (seitoID) => {
   memberError.value = "";
   const { data, error } = await supabase
     .from("Member")
-    .select('"Name","IconPath",item_card_count,kaishin_card_count,item_cards_valid_date')
+    .select(
+      '"Name","IconPath",item_card_count,kaishin_card_count,item_cards_valid_date',
+    )
     .eq("seitoID", seitoID.trim())
     .maybeSingle();
 
@@ -167,7 +169,13 @@ const resetMember = () => {
 
 // アイテムカードをボタンで使用（残数あり＆アタックボーナス64未満のときだけ押せる）
 const useItemCard = () => {
-  if (!hasMember.value || itemCardCount.value <= 0 || attackBonus.value >= 64 || answerSubmitted.value) return;
+  if (
+    !hasMember.value ||
+    itemCardCount.value <= 0 ||
+    attackBonus.value >= 64 ||
+    answerSubmitted.value
+  )
+    return;
   itemCardCount.value--;
   attackBonus.value *= 2;
   playSound(itemCardSound);
@@ -176,7 +184,13 @@ const useItemCard = () => {
 
 // 会心の一撃確率アップカードをボタンで使用（残数あり＆会心レート10未満のときだけ押せる）
 const useKaishinCard = () => {
-  if (!hasMember.value || kaishinCardCount.value <= 0 || kaishinRate.value >= 10 || answerSubmitted.value) return;
+  if (
+    !hasMember.value ||
+    kaishinCardCount.value <= 0 ||
+    kaishinRate.value >= 10 ||
+    answerSubmitted.value
+  )
+    return;
   kaishinCardCount.value--;
   kaishinRate.value += 3;
   playSound(kaishinRateSound);
@@ -260,7 +274,9 @@ const barcodeButtonClick = () => {
   buttonCaption.value = "読み込み準備ＯＫ";
   barcodeButton.value.disabled = true;
   hantei.value = "";
-  information.value = hasMember.value ? "バーコードを読み込んでください" : "IDカードを読み込んでください";
+  information.value = hasMember.value
+    ? "バーコードを読み込んでください"
+    : "IDカードを読み込んでください";
 };
 
 //バーコードインプット（生徒ID・問題・カード用）
@@ -609,8 +625,17 @@ const playSound = (sound) => {
       <button
         type="button"
         class="btn btn-sm mt-1"
-        :class="hasMember && itemCardCount > 0 && attackBonus < 64 && !answerSubmitted ? 'btn-warning' : 'btn-outline-secondary'"
-        :disabled="!hasMember || itemCardCount <= 0 || attackBonus >= 64 || answerSubmitted"
+        :class="
+          hasMember && itemCardCount > 0 && attackBonus < 64 && !answerSubmitted
+            ? 'btn-warning'
+            : 'btn-outline-secondary'
+        "
+        :disabled="
+          !hasMember ||
+          itemCardCount <= 0 ||
+          attackBonus >= 64 ||
+          answerSubmitted
+        "
         @click="useItemCard"
       >
         アイテムカードを使う
@@ -622,13 +647,29 @@ const playSound = (sound) => {
       <button
         type="button"
         class="btn btn-sm mt-1"
-        :class="hasMember && kaishinCardCount > 0 && kaishinRate < 10 && !answerSubmitted ? 'btn-info' : 'btn-outline-secondary'"
-        :disabled="!hasMember || kaishinCardCount <= 0 || kaishinRate >= 10 || answerSubmitted"
+        :class="
+          hasMember &&
+          kaishinCardCount > 0 &&
+          kaishinRate < 10 &&
+          !answerSubmitted
+            ? 'btn-info'
+            : 'btn-outline-secondary'
+        "
+        :disabled="
+          !hasMember ||
+          kaishinCardCount <= 0 ||
+          kaishinRate >= 10 ||
+          answerSubmitted
+        "
         @click="useKaishinCard"
       >
         会心アップを使う
       </button>
-      <button type="button" class="btn btn-outline-secondary btn-sm mt-2" @click="resetMember">
+      <button
+        type="button"
+        class="btn btn-outline-secondary btn-sm mt-2"
+        @click="resetMember"
+      >
         別の生徒
       </button>
       <p v-if="memberError" class="text-danger small mt-1">{{ memberError }}</p>
