@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { MonsterStore } from "@/stores/monster";
 import { supabase } from "@/supabase";
@@ -53,12 +53,18 @@ const hasMember = ref(false);
 const currentSeitoId = ref("");
 const memberName = ref("");
 const memberIconUrl = ref("");
-const itemCardCount = ref(0);
-const kaishinCardCount = ref(0);
+const baisuruNormal = ref(0);
+const kakuriaNormal = ref(0);
+const chronoNormal = ref(0);
 const memberError = ref("");
 const answerMode = ref(false);
 const afterAttackOrMiss = ref(false);
-const answerSubmitted = ref(false); // 答え入力後はアイテム・会心ボタンを無効化
+const answerSubmitted = ref(false); // 答え入力後はバイスル・カクリアボタンを無効化（クロノはいつでも可）
+
+// ゲーム状態: idle | playing | timeUp | victory（クロノボタンの使用可否用）
+const gamePhase = ref("idle");
+const isGameActive = computed(() => gamePhase.value === "playing");
+const isTimeUp = computed(() => gamePhase.value === "timeUp");
 
 //変数、配列
 let game;
@@ -77,6 +83,11 @@ const attackBonus = ref(1);
 let explosion;
 let dropItem = true;
 let dropKaishin = true;
+let dropChrono = false;
+
+// クロノカード: 時間停止 60秒、発動中に使うと60秒延長
+const CHRONO_DURATION_MS = 60 * 1000;
+let pauseEndTime = 0; // Date.now() を超えるまで time を更新しない
 
 //モンスター画像を読み込み
 let monsterImage = new Image();
@@ -118,14 +129,12 @@ const getTodayJapan = () => {
   return `${y}-${m}-${d}`;
 };
 
-// seitoID で Member を取得し、ref にセット（今日以外ならカード枚数は 0）
+// seitoID で Member を取得し、ref にセット（今日以外ならノーマルカード枚数は 0）
 const fetchMemberBySeitoId = async (seitoID) => {
   memberError.value = "";
   const { data, error } = await supabase
     .from("Member")
-    .select(
-      '"Name","IconPath",item_card_count,kaishin_card_count,item_cards_valid_date',
-    )
+    .select('"Name","IconPath",barcode_busters_items')
     .eq("seitoID", seitoID.trim())
     .maybeSingle();
 
@@ -139,9 +148,9 @@ const fetchMemberBySeitoId = async (seitoID) => {
   }
 
   const today = getTodayJapan();
-  const validDate = data.item_cards_valid_date
-    ? String(data.item_cards_valid_date).slice(0, 10)
-    : null;
+  const items = data.barcode_busters_items;
+  const validDate =
+    items && items.validDate ? String(items.validDate).slice(0, 10) : null;
   const isToday = validDate === today;
 
   currentSeitoId.value = seitoID.trim();
@@ -151,8 +160,9 @@ const fetchMemberBySeitoId = async (seitoID) => {
     const path = String(data.IconPath).replace(/^\//, "");
     memberIconUrl.value = import.meta.env.BASE_URL + path;
   }
-  itemCardCount.value = isToday ? (data.item_card_count ?? 0) : 0;
-  kaishinCardCount.value = isToday ? (data.kaishin_card_count ?? 0) : 0;
+  baisuruNormal.value = isToday ? (items?.baisuru?.normal ?? 0) : 0;
+  kakuriaNormal.value = isToday ? (items?.kakuria?.normal ?? 0) : 0;
+  chronoNormal.value = isToday ? (items?.chrono?.normal ?? 0) : 0;
   return true;
 };
 
@@ -161,52 +171,80 @@ const resetMember = () => {
   currentSeitoId.value = "";
   memberName.value = "";
   memberIconUrl.value = "";
-  itemCardCount.value = 0;
-  kaishinCardCount.value = 0;
+  baisuruNormal.value = 0;
+  kakuriaNormal.value = 0;
+  chronoNormal.value = 0;
   memberError.value = "";
   information.value = "IDカードを読み込んでください";
 };
 
-// アイテムカードをボタンで使用（残数あり＆アタックボーナス64未満のときだけ押せる）
-const useItemCard = () => {
+// バイスル（ノーマル）をボタンで使用（残数あり＆アタックボーナス64未満＆未回答のときだけ押せる）
+const useBaisuru = () => {
   if (
     !hasMember.value ||
-    itemCardCount.value <= 0 ||
+    baisuruNormal.value <= 0 ||
     attackBonus.value >= 64 ||
     answerSubmitted.value
   )
     return;
-  itemCardCount.value--;
+  baisuruNormal.value--;
   attackBonus.value *= 2;
   playSound(itemCardSound);
   updateMemberCardCounts();
 };
 
-// 会心の一撃確率アップカードをボタンで使用（残数あり＆会心レート10未満のときだけ押せる）
-const useKaishinCard = () => {
+// カクリア（ノーマル）をボタンで使用（残数あり＆会心レート10未満＆未回答のときだけ押せる）
+const useKakuria = () => {
   if (
     !hasMember.value ||
-    kaishinCardCount.value <= 0 ||
+    kakuriaNormal.value <= 0 ||
     kaishinRate.value >= 10 ||
     answerSubmitted.value
   )
     return;
-  kaishinCardCount.value--;
+  kakuriaNormal.value--;
   kaishinRate.value += 3;
   playSound(kaishinRateSound);
   updateMemberCardCounts();
 };
 
-// 生徒のカード枚数をDBに反映（今日の日付で）
+// クロノ（ノーマル）: いつでも使えてすぐ発動。60秒間時間停止。発動中に使うと60秒延長。
+const useChrono = () => {
+  if (!hasMember.value || chronoNormal.value <= 0) return;
+  const now = Date.now();
+  if (startTime && now < limitTime + startTime) {
+    // ゲーム開始後・時間切れ前のみ
+    chronoNormal.value--;
+    if (pauseEndTime > now) {
+      pauseEndTime += CHRONO_DURATION_MS;
+    } else {
+      pauseEndTime = now + CHRONO_DURATION_MS;
+    }
+    updateMemberCardCounts();
+  }
+};
+
+// 生徒のカード枚数をDBに反映（barcode_busters_items に保存）
 const updateMemberCardCounts = async () => {
   if (!currentSeitoId.value) return;
   const today = getTodayJapan();
   await supabase
     .from("Member")
     .update({
-      item_card_count: itemCardCount.value,
-      kaishin_card_count: kaishinCardCount.value,
-      item_cards_valid_date: today,
+      barcode_busters_items: {
+        validDate: today,
+        baisuru: {
+          normal: baisuruNormal.value,
+          silver: 0,
+          gold: 0,
+        },
+        kakuria: {
+          normal: kakuriaNormal.value,
+          silver: 0,
+          gold: 0,
+        },
+        chrono: { normal: chronoNormal.value },
+      },
     })
     .eq("seitoID", currentSeitoId.value);
 };
@@ -217,6 +255,7 @@ onMounted(() => {
   canvas.value.height = SCREEN_SIZE_H;
   con = canvas.value.getContext("2d");
   varInit();
+  pauseEndTime = 0;
   inputInit();
   drawMonster();
   startButton.value.hidden = false;
@@ -231,18 +270,29 @@ const start = () => {
   startButton.value.hidden = true;
   barcodeButton.value.disabled = false;
   varInit();
+  pauseEndTime = 0;
   inputInit();
   buttonInit();
   gameLoop();
+  gamePhase.value = "playing";
   information.value = "↓↓↓↓↓　　　下のボタンを押してください";
 };
 
 //ゲームループ
 const gameLoop = () => {
   game = setInterval(() => {
-    let t = 0;
+    const now = Date.now();
+    // クロノ発動中は時間を止める
+    if (pauseEndTime > 0 && now < pauseEndTime) {
+      // time は更新しない（前フレームのまま）
+      drawALL();
+      return;
+    }
+    if (pauseEndTime > 0 && now >= pauseEndTime) {
+      pauseEndTime = 0;
+    }
     //update処理
-    time = limitTime + startTime - Date.now();
+    time = limitTime + startTime - now;
     if (time < 0) {
       time = 0;
       clearInterval(game);
@@ -389,21 +439,27 @@ const attack = () => {
     explosion0Sound.play();
   }
 
-  //アイテム抽選
-  if (Math.random() * 7 < mondaiLevel) dropItem = true;
+  //バイスル抽選（ノーマルのみ）
+  if (Math.random() * 10 < mondaiLevel) dropItem = true;
 
-  //会心の一撃確率アップカード抽選
-  if (Math.random() * 8 < mondaiLevel) dropKaishin = true;
+  //カクリア抽選（ノーマルのみ）
+  if (Math.random() * 14 < mondaiLevel) dropKaishin = true;
+
+  //クロノ抽選: 問題レベルに依存せず常に30%
+  if (Math.random() < 0.9) dropChrono = true;
 
   // 抽選に当たったときは生徒情報のカード数も増やす（表示＋DB）
   if (hasMember.value) {
     if (dropItem) {
-      itemCardCount.value++;
+      baisuruNormal.value++;
     }
     if (dropKaishin) {
-      kaishinCardCount.value++;
+      kakuriaNormal.value++;
     }
-    if (dropItem || dropKaishin) {
+    if (dropChrono) {
+      chronoNormal.value++;
+    }
+    if (dropItem || dropKaishin || dropChrono) {
       updateMemberCardCounts();
     }
   }
@@ -425,6 +481,8 @@ const varInit = () => {
   explosion = 0;
   dropItem = false;
   dropKaishin = false;
+  dropChrono = false;
+  // pauseEndTime はここでリセットしない（クロノ発動中にバーコードボタンで「次の読み込み準備」を押してもクロノを維持する）
 };
 
 //インプット要素の初期化
@@ -458,6 +516,7 @@ const drawALL = () => {
   drawKaishin();
   drawDropItem();
   drawDropKaishin();
+  drawDropChrono();
 };
 
 const drawMonster = () => {
@@ -469,10 +528,22 @@ const drawMonster = () => {
 };
 
 const drawTime = () => {
+  // タイマー（TIME）は常に表示（クロノ発動中は time が止まっているのでその値のまま）
   const timeStr = "TIME : " + Math.floor(time / 1000);
   con.font = "50px Impact";
   con.fillStyle = "white";
   con.fillText(timeStr, 570, 50);
+
+  // クロノ発動中は「あと X 秒」を追加表示
+  const now = Date.now();
+  if (pauseEndTime > 0 && now < pauseEndTime) {
+    const remainSec = Math.ceil((pauseEndTime - now) / 1000);
+    con.font = "36px Impact";
+    con.fillStyle = "darkviolet";
+    con.fillRect(200, 150, 400, 80);
+    con.fillStyle = "white";
+    con.fillText("時間停止 あと " + remainSec + " 秒", 220, 190);
+  }
 };
 
 const drawHitpoint = () => {
@@ -543,9 +614,9 @@ const drawDropItem = () => {
   if (dropItem) {
     con.font = "30px Impact";
     con.fillStyle = "yellow";
-    con.fillRect(10, 270, 230, 40);
+    con.fillRect(10, 270, 250, 40);
     con.fillStyle = "red";
-    con.fillText("アイテムＧＥＴ", 20, 300);
+    con.fillText("２倍カード", 20, 300);
   }
 };
 
@@ -553,16 +624,27 @@ const drawDropKaishin = () => {
   if (dropKaishin) {
     con.font = "30px Impact";
     con.fillStyle = "violet";
-    con.fillRect(10, 320, 230, 70);
+    con.fillRect(10, 320, 250, 40);
     con.fillStyle = "mediumblue";
-    con.fillText("会心の一撃確率", 20, 350);
-    con.fillText("アップＧＥＴ", 20, 380);
+    con.fillText("確率アップカード", 20, 350);
+  }
+};
+
+const drawDropChrono = () => {
+  if (dropChrono) {
+    con.font = "30px Impact";
+    con.fillStyle = "darkviolet";
+    con.fillRect(10, 370, 250, 40);
+    con.fillStyle = "white";
+    con.fillText("時間停止カード", 20, 400);
   }
 };
 //各種情報表示処理************************************
 
 //時間切れ処理
 const timeUp = () => {
+  gamePhase.value = "timeUp";
+  pauseEndTime = 0;
   rouletteSound.pause();
   timeUpSound.play();
   con.font = "200px Impact";
@@ -577,6 +659,8 @@ const timeUp = () => {
 
 //勝利処理
 const victory = () => {
+  gamePhase.value = "victory";
+  pauseEndTime = 0;
   rouletteSound.pause();
   victorySound.play();
   con.font = "200px Impact";
@@ -596,6 +680,8 @@ const victory = () => {
 
 //中断してトップページに戻る
 const stop = () => {
+  gamePhase.value = "idle";
+  pauseEndTime = 0;
   rouletteSound.pause();
   clearInterval(game);
   router.push("/menu");
@@ -618,60 +704,94 @@ const playSound = (sound) => {
         class="member-icon"
       />
       <div v-else class="member-icon-placeholder">ー</div>
+      <div class="panel-section-label">ノーマルカード欄</div>
       <div class="member-row">
-        <span>アイテムカード</span>
-        <span>{{ hasMember ? itemCardCount : "ー" }}</span>
-      </div>
-      <button
-        type="button"
-        class="btn btn-sm mt-1"
-        :class="
-          hasMember && itemCardCount > 0 && attackBonus < 64 && !answerSubmitted
-            ? 'btn-warning'
-            : 'btn-outline-secondary'
-        "
-        :disabled="
-          !hasMember ||
-          itemCardCount <= 0 ||
-          attackBonus >= 64 ||
-          answerSubmitted
-        "
-        @click="useItemCard"
-      >
-        アイテムカードを使う
-      </button>
-      <div class="member-row">
-        <span>会心の一撃確率アップ</span>
-        <span>{{ hasMember ? kaishinCardCount : "ー" }}</span>
+        <span>２倍カード</span>
+        <span>{{ hasMember ? baisuruNormal : "ー" }}</span>
       </div>
       <button
         type="button"
         class="btn btn-sm mt-1"
         :class="
           hasMember &&
-          kaishinCardCount > 0 &&
+          baisuruNormal > 0 &&
+          attackBonus < 64 &&
+          !answerSubmitted &&
+          !answerMode
+            ? 'btn-warning'
+            : 'btn-outline-secondary'
+        "
+        :disabled="
+          !hasMember ||
+          baisuruNormal <= 0 ||
+          attackBonus >= 64 ||
+          answerSubmitted ||
+          answerMode
+        "
+        @click="useBaisuru"
+      >
+        攻撃力２倍
+      </button>
+      <div class="member-row">
+        <span>確率アップカード</span>
+        <span>{{ hasMember ? kakuriaNormal : "ー" }}</span>
+      </div>
+      <button
+        type="button"
+        class="btn btn-sm mt-1"
+        :class="
+          hasMember &&
+          kakuriaNormal > 0 &&
           kaishinRate < 10 &&
-          !answerSubmitted
+          !answerSubmitted &&
+          !answerMode
             ? 'btn-info'
             : 'btn-outline-secondary'
         "
         :disabled="
           !hasMember ||
-          kaishinCardCount <= 0 ||
+          kakuriaNormal <= 0 ||
           kaishinRate >= 10 ||
-          answerSubmitted
+          answerSubmitted ||
+          answerMode
         "
-        @click="useKaishinCard"
+        @click="useKakuria"
       >
-        会心アップを使う
+        会心の一撃確率アップ
       </button>
+      <div class="member-row">
+        <span>時間停止カード</span>
+        <span>{{ hasMember ? chronoNormal : "ー" }}</span>
+      </div>
       <button
         type="button"
-        class="btn btn-outline-secondary btn-sm mt-2"
-        @click="resetMember"
+        class="btn btn-sm mt-1"
+        :class="
+          hasMember && chronoNormal > 0 && !answerSubmitted && !answerMode
+            ? 'btn-secondary'
+            : 'btn-outline-secondary'
+        "
+        :disabled="
+          !hasMember ||
+          chronoNormal <= 0 ||
+          !isGameActive ||
+          isTimeUp ||
+          answerMode ||
+          answerSubmitted
+        "
+        @click="useChrono"
       >
-        別の生徒
+        時を止める
       </button>
+      <div>
+        <button
+          type="button"
+          class="btn btn-outline-secondary btn-sm mt-2"
+          @click="resetMember"
+        >
+          別の生徒
+        </button>
+      </div>
       <p v-if="memberError" class="text-danger small mt-1">{{ memberError }}</p>
     </aside>
     <div class="wrap" style="position: relative">
@@ -770,6 +890,13 @@ const playSound = (sound) => {
   border-radius: 8px;
   font-size: 12px;
   margin-bottom: 0.5rem;
+}
+.panel-section-label {
+  font-size: 12px;
+  font-weight: bold;
+  color: #495057;
+  margin-bottom: 0.5rem;
+  margin-top: 0.5rem;
 }
 .member-row {
   display: flex;
