@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { MonsterStore } from "@/stores/monster";
 import { supabase } from "@/supabase";
@@ -58,8 +58,7 @@ const kakuriaNormal = ref(0);
 const chronoNormal = ref(0);
 const memberError = ref("");
 const answerMode = ref(false);
-const afterAttackOrMiss = ref(false);
-const answerSubmitted = ref(false); // 答え入力後はバイスル・カクリアボタンを無効化（クロノはいつでも可）
+const answerSubmitted = ref(false); // 答え入力後はバイスル・カクリアボタンを無効化（クロノはいつでも可）。true のときに「このボタンを押せ」で resetMember
 
 // ゲーム状態: idle | playing | timeUp | victory（クロノボタンの使用可否用）
 const gamePhase = ref("idle");
@@ -71,7 +70,7 @@ let game;
 let startTime;
 let time;
 let limitTime;
-let con;
+let canvasContext;
 let correctAnswer = 0;
 let mondaiLevel = 0;
 let attackSlots = [0, 0, 0, 0, 0, 0, 0];
@@ -89,8 +88,16 @@ let dropChrono = false;
 const CHRONO_DURATION_MS = 60 * 1000;
 let pauseEndTime = 0; // Date.now() を超えるまで time を更新しない
 
+// 続きから用 localStorage（HP・残り時間・レベル）
+const SAVE_KEY = "barcodebusters_monster_save";
+let lastSaveTime = 0;
+const hasSavedGame = ref(false);
+
 //モンスター画像を読み込み
 let monsterImage = new Image();
+
+//背景画像を読み込み
+let haikeiImage = new Image();
 
 //爆発画像を読み込み
 let explosionImages = [];
@@ -178,12 +185,12 @@ const resetMember = () => {
   information.value = "IDカードを読み込んでください";
 };
 
-// バイスル（ノーマル）をボタンで使用（残数あり＆アタックボーナス64未満＆未回答のときだけ押せる）
+// バイスル（ノーマル）をボタンで使用（残数あり＆アタックボーナス128未満＆未回答のときだけ押せる）
 const useBaisuru = () => {
   if (
     !hasMember.value ||
     baisuruNormal.value <= 0 ||
-    attackBonus.value >= 64 ||
+    attackBonus.value >= 128 ||
     answerSubmitted.value
   )
     return;
@@ -210,11 +217,13 @@ const useKakuria = () => {
 
 // クロノ（ノーマル）: いつでも使えてすぐ発動。60秒間時間停止。発動中に使うと60秒延長。
 const useChrono = () => {
-  if (!hasMember.value || chronoNormal.value <= 0) return;
+  if (!hasMember.value || chronoNormal.value <= 0 || answerSubmitted.value)
+    return;
   const now = Date.now();
   if (startTime && now < limitTime + startTime) {
     // ゲーム開始後・時間切れ前のみ
     chronoNormal.value--;
+    limitTime += CHRONO_DURATION_MS;
     if (pauseEndTime > now) {
       pauseEndTime += CHRONO_DURATION_MS;
     } else {
@@ -249,23 +258,74 @@ const updateMemberCardCounts = async () => {
     .eq("seitoID", currentSeitoId.value);
 };
 
+// ゲーム状態を localStorage に保存（playing のときだけ）
+const saveGameState = () => {
+  if (gamePhase.value !== "playing") return;
+  const remaining = Math.max(0, limitTime + startTime - Date.now());
+  const data = {
+    currentLevel: monsterStore.currentLevel,
+    monsterHitpoint,
+    remainingTimeMs: remaining,
+    savedAt: Date.now(),
+  };
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  } catch (_) {}
+};
+
+const loadSavedState = () => {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (
+      !data ||
+      typeof data.currentLevel !== "number" ||
+      typeof data.monsterHitpoint !== "number" ||
+      typeof data.remainingTimeMs !== "number"
+    )
+      return null;
+    return data;
+  } catch (_) {
+    return null;
+  }
+};
+
+const clearSavedGame = () => {
+  try {
+    localStorage.removeItem(SAVE_KEY);
+  } catch (_) {}
+  hasSavedGame.value = false;
+};
+
 //マウント後の処理
 onMounted(() => {
   canvas.value.width = SCREEN_SIZE_W;
   canvas.value.height = SCREEN_SIZE_H;
-  con = canvas.value.getContext("2d");
+  canvasContext = canvas.value.getContext("2d");
   varInit();
   pauseEndTime = 0;
   inputInit();
   drawMonster();
   startButton.value.hidden = false;
+  hasSavedGame.value = !!loadSavedState();
+  window.addEventListener("beforeunload", saveGameState);
 });
 
-//スタートボタン
-const start = () => {
-  monsterImage.src = monsterStore.monsterStatus[1];
-  monsterHitpoint = monsterStore.monsterStatus[2];
-  limitTime = monsterStore.monsterStatus[3];
+onUnmounted(() => {
+  window.removeEventListener("beforeunload", saveGameState);
+});
+
+// 続きから復元
+const resumeGame = (saved) => {
+  hasSavedGame.value = false;
+  monsterStore.currentLevel = saved.currentLevel;
+  const status = monsterStore.monsterStatus;
+  if (!status) return;
+  monsterImage.src = status[1];
+  haikeiImage.src = status[4];
+  monsterHitpoint = saved.monsterHitpoint;
+  limitTime = saved.remainingTimeMs;
   startTime = Date.now();
   startButton.value.hidden = true;
   barcodeButton.value.disabled = false;
@@ -273,6 +333,37 @@ const start = () => {
   pauseEndTime = 0;
   inputInit();
   buttonInit();
+  lastSaveTime = Date.now();
+  gameLoop();
+  gamePhase.value = "playing";
+  information.value = "↓↓↓↓↓　　　下のボタンを押してください";
+};
+
+// スタート or 続きから
+const startOrResume = () => {
+  const saved = loadSavedState();
+  if (saved) {
+    resumeGame(saved);
+  } else {
+    start();
+  }
+};
+
+//スタートボタン（新規ゲーム）
+const start = () => {
+  clearSavedGame();
+  monsterImage.src = monsterStore.monsterStatus[1];
+  monsterHitpoint = monsterStore.monsterStatus[2];
+  limitTime = monsterStore.monsterStatus[3];
+  haikeiImage.src = monsterStore.monsterStatus[4];
+  startTime = Date.now();
+  startButton.value.hidden = true;
+  barcodeButton.value.disabled = false;
+  varInit();
+  pauseEndTime = 0;
+  inputInit();
+  buttonInit();
+  lastSaveTime = Date.now();
   gameLoop();
   gamePhase.value = "playing";
   information.value = "↓↓↓↓↓　　　下のボタンを押してください";
@@ -283,28 +374,32 @@ const gameLoop = () => {
   game = setInterval(() => {
     const now = Date.now();
     // クロノ発動中は時間を止める
-    if (pauseEndTime > 0 && now < pauseEndTime) {
-      // time は更新しない（前フレームのまま）
-      drawALL();
-      return;
+    if (pauseEndTime < 0 || now > pauseEndTime) {
+      //update処理
+      time = limitTime + startTime - now;
+      if (time < 0) {
+        time = 0;
+        clearInterval(game);
+        setTimeout(() => {
+          timeUp();
+        }, 200);
+      }
     }
+
     if (pauseEndTime > 0 && now >= pauseEndTime) {
       pauseEndTime = 0;
     }
-    //update処理
-    time = limitTime + startTime - now;
-    if (time < 0) {
-      time = 0;
-      clearInterval(game);
-      setTimeout(() => {
-        timeUp();
-      }, 200);
-    }
+
     if (monsterHitpoint <= 0) {
       clearInterval(game);
       setTimeout(() => {
         victory();
       }, 200);
+    }
+    // 約1秒ごとにセーブ
+    if (now - lastSaveTime >= 1000) {
+      saveGameState();
+      lastSaveTime = now;
     }
     //draw処理
     drawALL();
@@ -313,9 +408,8 @@ const gameLoop = () => {
 
 //バーコード準備ボタン
 const barcodeButtonClick = () => {
-  if (afterAttackOrMiss.value) {
+  if (answerSubmitted.value) {
     resetMember();
-    afterAttackOrMiss.value = false;
   }
   answerSubmitted.value = false;
   varInit();
@@ -350,7 +444,7 @@ const barcodeInputBlur = async () => {
   }
 
   const initialLetter = barcode.value.slice(0, 1);
-  if (initialLetter === "S") {
+  if (initialLetter === "S" || initialLetter === "B") {
     answerSubmitted.value = false; // 新しい問題なのでカード使用可能に
     answerInput.value.disabled = false;
     answerInput.value.focus();
@@ -389,7 +483,6 @@ const answerInputBlur = () => {
     hantei.value = "はずれ";
     buttonInit();
     information.value = "↓↓↓↓↓　　　下のボタンを押してください";
-    afterAttackOrMiss.value = true;
   }
   answerMode.value = false;
   answerInput.value.disabled = true;
@@ -402,9 +495,9 @@ const attack = () => {
   if (Math.random() * 10 < kaishinRate.value) {
     attackSlots.fill(9);
   } else {
-    attackSlots[0] = Math.floor(Math.random() * 5);
-    attackSlots[1] = Math.floor(Math.random() * 5) + 1;
-    attackSlots[2] = Math.floor(Math.random() * 5) + 3;
+    attackSlots[0] = Math.floor(Math.random() * 8);
+    attackSlots[1] = Math.floor(Math.random() * 7) + 3;
+    attackSlots[2] = Math.floor(Math.random() * 6) + 4;
     attackSlots[3] = Math.floor(Math.random() * 5) + 5;
     attackSlots[4] = Math.floor(Math.random() * 4) + 6;
     attackSlots[5] = Math.floor(Math.random() * 3) + 7;
@@ -423,13 +516,13 @@ const attack = () => {
 
   //効果音を鳴らす
   rouletteSound.pause();
-  if (attackPower > 100) {
+  if (attackPower > 1000) {
     explosion4Sound.play();
     explosion = 20;
-  } else if (attackPower > 50) {
+  } else if (attackPower > 500) {
     explosion3Sound.play();
     explosion = 16;
-  } else if (attackPower > 20) {
+  } else if (attackPower > 200) {
     explosion2Sound.play();
     explosion = 12;
   } else if (attackPower > 0) {
@@ -440,13 +533,13 @@ const attack = () => {
   }
 
   //バイスル抽選（ノーマルのみ）
-  if (Math.random() * 10 < mondaiLevel) dropItem = true;
+  if (Math.random() * 15 < mondaiLevel + 3) dropItem = true;
 
   //カクリア抽選（ノーマルのみ）
-  if (Math.random() * 14 < mondaiLevel) dropKaishin = true;
+  if (Math.random() * 15 < mondaiLevel) dropKaishin = true;
 
   //クロノ抽選: 問題レベルに依存せず常に30%
-  if (Math.random() < 0.9) dropChrono = true;
+  if (Math.random() < 0.3) dropChrono = true;
 
   // 抽選に当たったときは生徒情報のカード数も増やす（表示＋DB）
   if (hasMember.value) {
@@ -467,7 +560,7 @@ const attack = () => {
   buttonInit();
   hantei.value = "";
   information.value = "↓↓↓↓↓　　　下のボタンを押してください";
-  afterAttackOrMiss.value = true;
+  saveGameState();
 };
 
 //変数の初期化
@@ -520,136 +613,152 @@ const drawALL = () => {
 };
 
 const drawMonster = () => {
-  con.fillStyle = SCREEN_BK_COLOR;
-  con.fillRect(0, 0, SCREEN_SIZE_W, SCREEN_SIZE_H);
+  // 背景画像にhaikeiimageを使用
+  if (haikeiImage.complete && haikeiImage.naturalWidth > 0) {
+    canvasContext.drawImage(haikeiImage, 0, 0, SCREEN_SIZE_W, SCREEN_SIZE_H);
+  } else {
+    canvasContext.fillStyle = SCREEN_BK_COLOR;
+    canvasContext.fillRect(0, 0, SCREEN_SIZE_W, SCREEN_SIZE_H);
+  }
+  // 背景描画の直後
+  canvasContext.fillStyle = "rgba(0, 0, 0, 0.65)";
+  canvasContext.fillRect(0, 0, SCREEN_SIZE_W, SCREEN_SIZE_H);
+  // モンスター描画
   if (monsterImage.complete && monsterImage.naturalWidth > 0) {
-    con.drawImage(monsterImage, 150, 0, 500, 500);
+    canvasContext.drawImage(monsterImage, 150, 0, 500, 500);
   }
 };
 
 const drawTime = () => {
   // タイマー（TIME）は常に表示（クロノ発動中は time が止まっているのでその値のまま）
   const timeStr = "TIME : " + Math.floor(time / 1000);
-  con.font = "50px Impact";
-  con.fillStyle = "white";
-  con.fillText(timeStr, 570, 50);
+  canvasContext.font = "50px Impact";
+  canvasContext.fillStyle = "white";
+  canvasContext.fillText(timeStr, 570, 50);
 
   // クロノ発動中は「あと X 秒」を追加表示
   const now = Date.now();
   if (pauseEndTime > 0 && now < pauseEndTime) {
     const remainSec = Math.ceil((pauseEndTime - now) / 1000);
-    con.font = "36px Impact";
-    con.fillStyle = "darkviolet";
-    con.fillRect(200, 150, 400, 80);
-    con.fillStyle = "white";
-    con.fillText("時間停止 あと " + remainSec + " 秒", 220, 190);
+    canvasContext.font = "60px Impact";
+    canvasContext.fillStyle = "darkviolet";
+    canvasContext.fillRect(120, 140, 560, 110);
+    canvasContext.fillStyle = "white";
+    canvasContext.fillText("時間停止 あと " + remainSec + " 秒", 140, 220);
   }
 };
 
 const drawHitpoint = () => {
   const hpStr = "HP : " + monsterHitpoint;
-  con.font = "50px Impact";
-  con.fillStyle = "white";
-  con.fillText(hpStr, 10, 50);
+  canvasContext.font = "50px Impact";
+  canvasContext.fillStyle = "white";
+  canvasContext.fillText(hpStr, 10, 50);
 };
 
 const drawAttackSlot = () => {
   for (let i = 0; i < mondaiLevel; i++) {
     if (attacked) {
-      con.drawImage(slotImages[attackSlots[i]], 100 + 100 * i, 400, 100, 100);
+      canvasContext.drawImage(
+        slotImages[attackSlots[i]],
+        100 + 100 * i,
+        400,
+        100,
+        100,
+      );
     } else if (!attackButton.value.hidden) {
       const r = Math.floor(Math.random() * 10);
-      con.drawImage(slotImages[r], 100 + 100 * i, 400, 100, 100);
+      canvasContext.drawImage(slotImages[r], 100 + 100 * i, 400, 100, 100);
       rouletteSound.play();
     } else {
-      con.drawImage(slotImages[10], 100 + 100 * i, 400, 100, 100);
+      canvasContext.drawImage(slotImages[10], 100 + 100 * i, 400, 100, 100);
     }
   }
 };
 
 const drawAttackPower = () => {
   if (attackPower) {
-    con.font = "50px Impact";
-    con.fillStyle = "yellow";
-    con.fillText("攻撃力", 30, 200);
-    con.fillText(attackPower, 80, 250);
+    canvasContext.font = "50px Impact";
+    canvasContext.fillStyle = "yellow";
+    canvasContext.fillText("攻撃力", 30, 200);
+    canvasContext.fillText(attackPower, 80, 250);
   }
 };
 
 const drawAttackBonus = () => {
   if (attackBonus.value > 1) {
-    con.font = "50px Impact";
-    con.fillStyle = "blue";
-    con.fillText("×" + attackBonus.value, 10, 475);
+    canvasContext.font = "50px Impact";
+    canvasContext.fillStyle = "blue";
+    canvasContext.fillText("×" + attackBonus.value, 10, 475);
   }
 };
 
 const drawKaishinRate = () => {
   if (kaishinRate.value > 1) {
-    con.font = "28px Impact";
-    con.fillStyle = "deeppink";
-    con.fillText("会心の一撃確率", 600, 350);
-    con.font = "50px Impact";
-    con.fillText(kaishinRate.value * 10 + "％", 650, 400);
+    canvasContext.font = "28px Impact";
+    canvasContext.fillStyle = "deeppink";
+    canvasContext.fillText("会心の一撃確率", 600, 350);
+    canvasContext.font = "50px Impact";
+    canvasContext.fillText(kaishinRate.value * 10 + "％", 650, 400);
   }
 };
 
 const drawExplosion = () => {
   if (explosion) {
     const imageNum = explosion % 2;
-    con.drawImage(explosionImages[imageNum], 250, 70, 300, 300);
+    canvasContext.drawImage(explosionImages[imageNum], 250, 70, 300, 300);
     explosion--;
   }
 };
 
 const drawKaishin = () => {
   if (attackSlots[0] == 9) {
-    con.font = "100px Impact";
-    con.fillStyle = "fuchsia";
-    con.fillText("会心の一撃", 170, 150);
+    canvasContext.font = "100px Impact";
+    canvasContext.fillStyle = "fuchsia";
+    canvasContext.fillText("会心の一撃", 170, 150);
   }
 };
 
 const drawDropItem = () => {
   if (dropItem) {
-    con.font = "30px Impact";
-    con.fillStyle = "yellow";
-    con.fillRect(10, 270, 250, 40);
-    con.fillStyle = "red";
-    con.fillText("２倍カード", 20, 300);
+    canvasContext.font = "30px Impact";
+    canvasContext.fillStyle = "yellow";
+    canvasContext.fillRect(10, 270, 250, 40);
+    canvasContext.fillStyle = "red";
+    canvasContext.fillText("２倍カード", 20, 300);
   }
 };
 
 const drawDropKaishin = () => {
   if (dropKaishin) {
-    con.font = "30px Impact";
-    con.fillStyle = "violet";
-    con.fillRect(10, 320, 250, 40);
-    con.fillStyle = "mediumblue";
-    con.fillText("確率アップカード", 20, 350);
+    canvasContext.font = "30px Impact";
+    canvasContext.fillStyle = "violet";
+    canvasContext.fillRect(10, 320, 250, 40);
+    canvasContext.fillStyle = "mediumblue";
+    canvasContext.fillText("確率アップカード", 20, 350);
   }
 };
 
 const drawDropChrono = () => {
   if (dropChrono) {
-    con.font = "30px Impact";
-    con.fillStyle = "darkviolet";
-    con.fillRect(10, 370, 250, 40);
-    con.fillStyle = "white";
-    con.fillText("時間停止カード", 20, 400);
+    canvasContext.font = "30px Impact";
+    canvasContext.fillStyle = "darkviolet";
+    canvasContext.fillRect(10, 370, 250, 40);
+    canvasContext.fillStyle = "white";
+    canvasContext.fillText("時間停止カード", 20, 400);
   }
 };
 //各種情報表示処理************************************
 
 //時間切れ処理
 const timeUp = () => {
+  clearSavedGame();
   gamePhase.value = "timeUp";
   pauseEndTime = 0;
   rouletteSound.pause();
   timeUpSound.play();
-  con.font = "200px Impact";
-  con.fillStyle = "aqua";
-  con.fillText("TIME UP", 100, 200);
+  canvasContext.font = "200px Impact";
+  canvasContext.fillStyle = "aqua";
+  canvasContext.fillText("TIME UP", 100, 200);
   barcodeButton.value.disabled = true;
   barcodeInput.value.disabled = true;
   answerInput.value.disabled = true;
@@ -659,13 +768,14 @@ const timeUp = () => {
 
 //勝利処理
 const victory = () => {
+  clearSavedGame();
   gamePhase.value = "victory";
   pauseEndTime = 0;
   rouletteSound.pause();
   victorySound.play();
-  con.font = "200px Impact";
-  con.fillStyle = "aqua";
-  con.fillText("勝　利", 150, 200);
+  canvasContext.font = "200px Impact";
+  canvasContext.fillStyle = "aqua";
+  canvasContext.fillText("勝　利", 150, 200);
   barcodeButton.value.disabled = true;
   barcodeInput.value.disabled = true;
   answerInput.value.disabled = true;
@@ -680,6 +790,7 @@ const victory = () => {
 
 //中断してトップページに戻る
 const stop = () => {
+  clearSavedGame();
   gamePhase.value = "idle";
   pauseEndTime = 0;
   rouletteSound.pause();
@@ -715,7 +826,7 @@ const playSound = (sound) => {
         :class="
           hasMember &&
           baisuruNormal > 0 &&
-          attackBonus < 64 &&
+          attackBonus < 128 &&
           !answerSubmitted &&
           !answerMode
             ? 'btn-warning'
@@ -724,7 +835,7 @@ const playSound = (sound) => {
         :disabled="
           !hasMember ||
           baisuruNormal <= 0 ||
-          attackBonus >= 64 ||
+          attackBonus >= 128 ||
           answerSubmitted ||
           answerMode
         "
@@ -799,8 +910,8 @@ const playSound = (sound) => {
       <button
         ref="startButton"
         class="startButton btn btn-light"
-        @click="start"
-        v-text="startCaption"
+        @click="startOrResume"
+        v-text="hasSavedGame ? '続きから' : startCaption"
         hidden
       ></button>
       <div class="info" v-text="information"></div>
@@ -843,6 +954,7 @@ const playSound = (sound) => {
         @keydown.enter="barcodeInput.blur()"
         v-model="barcode"
         autocomplete="off"
+        type="password"
       />
       <div class="mekakushi" style=""></div>
 
@@ -923,7 +1035,7 @@ const playSound = (sound) => {
 }
 .barcodeInput {
   position: absolute;
-  top: 610px;
+  top: 615px;
   left: 750px;
   width: 0px;
 }
@@ -932,9 +1044,10 @@ const playSound = (sound) => {
   top: 610px;
   left: 700px;
   width: 100px;
-  height: 50px;
+  height: 40px;
   display: block;
-  background-color: white;
+  background-color: black;
+  opacity: 0.1;
 }
 .barcodeButton {
   font-size: 25px;
