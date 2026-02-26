@@ -487,6 +487,9 @@ const answerInputBlur = () => {
   answerMode.value = false;
   answerInput.value.disabled = true;
   inputedAnswer.value = "";
+  setTimeout(() => {
+    attackButton.value.focus();
+  }, 10);
 };
 
 //攻撃ボタン
@@ -621,7 +624,7 @@ const drawMonster = () => {
     canvasContext.fillRect(0, 0, SCREEN_SIZE_W, SCREEN_SIZE_H);
   }
   // 背景描画の直後
-  canvasContext.fillStyle = "rgba(0, 0, 0, 0.65)";
+  canvasContext.fillStyle = "rgba(0, 0, 0, 0.5)";
   canvasContext.fillRect(0, 0, SCREEN_SIZE_W, SCREEN_SIZE_H);
   // モンスター描画
   if (monsterImage.complete && monsterImage.naturalWidth > 0) {
@@ -1046,8 +1049,7 @@ const playSound = (sound) => {
   width: 100px;
   height: 40px;
   display: block;
-  background-color: black;
-  opacity: 0.1;
+  background-color: white;
 }
 .barcodeButton {
   font-size: 25px;
