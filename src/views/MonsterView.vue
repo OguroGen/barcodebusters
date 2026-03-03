@@ -11,6 +11,7 @@ const monsterStore = MonsterStore();
 const SCREEN_SIZE_W = 800;
 const SCREEN_SIZE_H = 500;
 const SCREEN_BK_COLOR = "#66AAFF";
+const MAX_ATTACK_SLOTS = 35;
 const SLOT_SRC = [
   "/images/number_0.png",
   "/images/number_1.png",
@@ -56,6 +57,7 @@ const memberIconUrl = ref("");
 const baisuruNormal = ref(0);
 const kakuriaNormal = ref(0);
 const chronoNormal = ref(0);
+const slotPlusNormal = ref(0);
 const memberError = ref("");
 const answerMode = ref(false);
 const answerSubmitted = ref(false); // 答え入力後はバイスル・カクリアボタンを無効化（クロノはいつでも可）。true のときに「このボタンを押せ」で resetMember
@@ -72,9 +74,11 @@ let time;
 let limitTime;
 let canvasContext;
 let correctAnswer = 0;
-let mondaiLevel = 0;
-let attackSlots = [0, 0, 0, 0, 0, 0, 0];
+const mondaiLevel = ref(0);
+let attackSlots = Array(MAX_ATTACK_SLOTS).fill(0);
 let attacked = false;
+const extraSlotsNextAttack = ref(0);
+let effectiveSlotsUsed = 0;
 const kaishinRate = ref(1);
 let monsterHitpoint;
 let attackPower;
@@ -83,6 +87,14 @@ let explosion;
 let dropItem = true;
 let dropKaishin = true;
 let dropChrono = false;
+let dropSlotPlus = false;
+// 玉追加時の落下アニメーション（上からズドーン）
+let slotDropAnim = {
+  active: false,
+  targetIndex: 0,
+  startTime: 0,
+  duration: 185,
+};
 
 // クロノカード: 時間停止 60秒、発動中に使うと60秒延長
 const CHRONO_DURATION_MS = 60 * 1000;
@@ -122,6 +134,7 @@ const explosion4Sound = new Audio("/sounds/bomb2.mp3");
 const victorySound = new Audio("/sounds/people-people-stadium-cheer1.mp3");
 const timeUpSound = new Audio("/sounds/game-princess-lose1.mp3");
 const itemCardSound = new Audio("/sounds/game-thief-boy-special3.mp3");
+const slotPlusImpactSound = new Audio("/sounds/taiko-don.mp3");
 const kaishinRateSound = new Audio("/sounds/AmountDisplay.mp3");
 const rouletteSound = new Audio("/sounds/ElectronicRouletteSpinning.mp3");
 rouletteSound.loop = true;
@@ -170,6 +183,7 @@ const fetchMemberBySeitoId = async (seitoID) => {
   baisuruNormal.value = isToday ? (items?.baisuru?.normal ?? 0) : 0;
   kakuriaNormal.value = isToday ? (items?.kakuria?.normal ?? 0) : 0;
   chronoNormal.value = isToday ? (items?.chrono?.normal ?? 0) : 0;
+  slotPlusNormal.value = isToday ? (items?.slotPlus?.normal ?? 0) : 0;
   return true;
 };
 
@@ -181,6 +195,7 @@ const resetMember = () => {
   baisuruNormal.value = 0;
   kakuriaNormal.value = 0;
   chronoNormal.value = 0;
+  slotPlusNormal.value = 0;
   memberError.value = "";
   information.value = "IDカードを読み込んでください";
 };
@@ -233,6 +248,30 @@ const useChrono = () => {
   }
 };
 
+// 攻撃玉追加カード: 次の1回の攻撃のみ玉が1つ増える（最大35まで）。問題読み込み後〜答え入力前（answerMode）の間のみ使用可
+const useSlotPlus = () => {
+  if (
+    !hasMember.value ||
+    slotPlusNormal.value <= 0 ||
+    !answerMode.value ||
+    answerSubmitted.value ||
+    Number(mondaiLevel.value) + extraSlotsNextAttack.value >= MAX_ATTACK_SLOTS
+  )
+    return;
+  slotPlusNormal.value--;
+  extraSlotsNextAttack.value += 1;
+  playSound(slotPlusImpactSound);
+  const newSlotIndex =
+    Number(mondaiLevel.value) + extraSlotsNextAttack.value - 1;
+  slotDropAnim = {
+    active: true,
+    targetIndex: newSlotIndex,
+    startTime: Date.now(),
+    duration: 185,
+  };
+  updateMemberCardCounts();
+};
+
 // 生徒のカード枚数をDBに反映（barcode_busters_items に保存）
 const updateMemberCardCounts = async () => {
   if (!currentSeitoId.value) return;
@@ -253,6 +292,7 @@ const updateMemberCardCounts = async () => {
           gold: 0,
         },
         chrono: { normal: chronoNormal.value },
+        slotPlus: { normal: slotPlusNormal.value },
       },
     })
     .eq("seitoID", currentSeitoId.value);
@@ -419,7 +459,7 @@ const barcodeButtonClick = () => {
   barcodeButton.value.disabled = true;
   hantei.value = "";
   information.value = hasMember.value
-    ? "バーコードを読み込んでください"
+    ? "問題のバーコードを読み込んでください"
     : "IDカードを読み込んでください";
 };
 
@@ -433,7 +473,7 @@ const barcodeInputBlur = async () => {
       if (ok) {
         hasMember.value = true;
         memberError.value = "";
-        information.value = "バーコードを読み込んでください";
+        information.value = "問題のバーコードを読み込んでください";
       } else {
         memberError.value = memberError.value || "取得に失敗しました";
       }
@@ -449,7 +489,7 @@ const barcodeInputBlur = async () => {
     answerInput.value.disabled = false;
     answerInput.value.focus();
     answerMode.value = true;
-    mondaiLevel = barcode.value.slice(1, 2);
+    mondaiLevel.value = barcode.value.slice(1, 2);
     correctAnswer = barcode.value.slice(2) / 3;
     buttonCaption.value = "読み込み完了";
     information.value = "答えを入力してください　　　↓↓↓↓↓↓";
@@ -463,7 +503,7 @@ const barcodeInputBlur = async () => {
     if (ok) {
       hasMember.value = true;
       memberError.value = "";
-      information.value = "バーコードを読み込んでください";
+      information.value = "問題のバーコードを読み込んでください";
     } else {
       memberError.value = memberError.value || "取得に失敗しました";
     }
@@ -494,24 +534,27 @@ const answerInputBlur = () => {
 
 //攻撃ボタン
 const attack = () => {
-  //攻撃力の計算
+  const effectiveMondaiLevel = Math.min(
+    Number(mondaiLevel.value) + extraSlotsNextAttack.value,
+    MAX_ATTACK_SLOTS,
+  );
+  effectiveSlotsUsed = effectiveMondaiLevel;
+
+  //攻撃力の計算（スロット出目を35個分決定）
   if (Math.random() * 10 < kaishinRate.value) {
     attackSlots.fill(9);
   } else {
-    attackSlots[0] = Math.floor(Math.random() * 8);
-    attackSlots[1] = Math.floor(Math.random() * 7) + 3;
-    attackSlots[2] = Math.floor(Math.random() * 6) + 4;
-    attackSlots[3] = Math.floor(Math.random() * 5) + 5;
-    attackSlots[4] = Math.floor(Math.random() * 4) + 6;
-    attackSlots[5] = Math.floor(Math.random() * 3) + 7;
-    attackSlots[6] = Math.floor(Math.random() * 2) + 8;
+    for (let i = 0; i < MAX_ATTACK_SLOTS; i++) {
+      attackSlots[i] = Math.floor(Math.random() * 9);
+    }
   }
 
-  for (let i = 0; i < mondaiLevel; i++) {
+  for (let i = 0; i < effectiveMondaiLevel; i++) {
     attackPower += attackSlots[i];
   }
 
   attackPower *= attackBonus.value;
+  extraSlotsNextAttack.value = 0;
 
   //攻撃処理
   attacked = true;
@@ -536,13 +579,16 @@ const attack = () => {
   }
 
   //バイスル抽選（ノーマルのみ）
-  if (Math.random() * 15 < mondaiLevel + 3) dropItem = true;
+  if (Math.random() < 0.6) dropItem = true;
 
   //カクリア抽選（ノーマルのみ）
-  if (Math.random() * 15 < mondaiLevel) dropKaishin = true;
+  if (Math.random() < 0.4) dropKaishin = true;
 
-  //クロノ抽選: 問題レベルに依存せず常に30%
-  if (Math.random() < 0.3) dropChrono = true;
+  //クロノ抽選（ノーマルのみ）
+  if (Math.random() < 0.5) dropChrono = true;
+
+  // 攻撃玉追加カード抽選（20％）
+  if (Math.random() < 0.4) dropSlotPlus = true;
 
   // 抽選に当たったときは生徒情報のカード数も増やす（表示＋DB）
   if (hasMember.value) {
@@ -555,7 +601,10 @@ const attack = () => {
     if (dropChrono) {
       chronoNormal.value++;
     }
-    if (dropItem || dropKaishin || dropChrono) {
+    if (dropSlotPlus) {
+      slotPlusNormal.value++;
+    }
+    if (dropItem || dropKaishin || dropChrono || dropSlotPlus) {
       updateMemberCardCounts();
     }
   }
@@ -568,16 +617,20 @@ const attack = () => {
 
 //変数の初期化
 const varInit = () => {
-  attackSlots = [0, 0, 0, 0, 0, 0, 0];
+  attackSlots = Array(MAX_ATTACK_SLOTS).fill(0);
   attackPower = 0;
   attackBonus.value = 1;
   kaishinRate.value = 1;
   attacked = false;
-  mondaiLevel = 0;
+  mondaiLevel.value = 0;
+  extraSlotsNextAttack.value = 0;
+  effectiveSlotsUsed = 0;
   explosion = 0;
   dropItem = false;
   dropKaishin = false;
   dropChrono = false;
+  dropSlotPlus = false;
+  slotDropAnim = { active: false, targetIndex: 0, startTime: 0, duration: 185 };
   // pauseEndTime はここでリセットしない（クロノ発動中にバーコードボタンで「次の読み込み準備」を押してもクロノを維持する）
 };
 
@@ -613,6 +666,7 @@ const drawALL = () => {
   drawDropItem();
   drawDropKaishin();
   drawDropChrono();
+  drawDropSlotPlus();
 };
 
 const drawMonster = () => {
@@ -659,22 +713,70 @@ const drawHitpoint = () => {
 };
 
 const drawAttackSlot = () => {
-  for (let i = 0; i < mondaiLevel; i++) {
-    if (attacked) {
-      canvasContext.drawImage(
-        slotImages[attackSlots[i]],
-        100 + 100 * i,
-        400,
-        100,
-        100,
+  const displayCount = attacked
+    ? effectiveSlotsUsed
+    : Math.min(
+        Number(mondaiLevel.value) + extraSlotsNextAttack.value,
+        MAX_ATTACK_SLOTS,
       );
-    } else if (!attackButton.value.hidden) {
-      const r = Math.floor(Math.random() * 10);
-      canvasContext.drawImage(slotImages[r], 100 + 100 * i, 400, 100, 100);
-      rouletteSound.play();
-    } else {
-      canvasContext.drawImage(slotImages[10], 100 + 100 * i, 400, 100, 100);
+  const slotSize = 100;
+  const cols = 7;
+  // 落下アニメ中は追加された玉をメインループでは描画しない（アニメでだけ描画）
+  const skipIndex = slotDropAnim.active ? slotDropAnim.targetIndex : -1;
+
+  // 下の段から描画（i=0〜6が最下段、8個目以降はその上に積み上げ）
+  for (let i = 0; i < MAX_ATTACK_SLOTS; i++) {
+    if (i === skipIndex) continue;
+    const col = i % cols;
+    const rowIndex = Math.floor(i / cols);
+    const x = 100 + col * slotSize;
+    const y = SCREEN_SIZE_H - slotSize * (rowIndex + 1);
+    if (i < displayCount) {
+      if (attacked) {
+        canvasContext.drawImage(
+          slotImages[attackSlots[i]],
+          x,
+          y,
+          slotSize,
+          slotSize,
+        );
+      } else if (!attackButton.value.hidden) {
+        const r = Math.floor(Math.random() * 10);
+        canvasContext.drawImage(slotImages[r], x, y, slotSize, slotSize);
+        rouletteSound.play();
+      } else {
+        canvasContext.drawImage(slotImages[10], x, y, slotSize, slotSize);
+      }
     }
+    // 未使用枠（i >= displayCount）は描画しない
+  }
+
+  // 玉追加時の落下アニメーション（上からズドーン・重厚な着地）
+  if (slotDropAnim.active) {
+    const elapsed = Date.now() - slotDropAnim.startTime;
+    const progress = Math.min(1, elapsed / slotDropAnim.duration);
+    // easeOutBack: 最後に一気に加速して着地し、わずかにオーバーシュートして戻る（ズドン）
+    const c1 = 0.6;
+    const c3 = c1 + 1;
+    const easeOutBack =
+      progress < 1
+        ? 1 + c3 * Math.pow(progress - 1, 3) + c1 * Math.pow(progress - 1, 2)
+        : 1;
+    const ti = slotDropAnim.targetIndex;
+    const col = ti % cols;
+    const rowIndex = Math.floor(ti / cols);
+    const animX = 100 + col * slotSize;
+    const endY = SCREEN_SIZE_H - slotSize * (rowIndex + 1);
+    const startY = -slotSize * 2;
+    const currentY = startY + (endY - startY) * easeOutBack;
+    canvasContext.drawImage(
+      slotImages[10],
+      animX,
+      currentY,
+      slotSize,
+      slotSize,
+    );
+    if (progress >= 1) slotDropAnim.active = false;
   }
 };
 
@@ -721,33 +823,53 @@ const drawKaishin = () => {
   }
 };
 
+const DROP_DISPLAY_ALPHA = 0.7;
+
 const drawDropItem = () => {
   if (dropItem) {
+    canvasContext.globalAlpha = DROP_DISPLAY_ALPHA;
     canvasContext.font = "30px Impact";
     canvasContext.fillStyle = "yellow";
     canvasContext.fillRect(10, 270, 250, 40);
     canvasContext.fillStyle = "red";
     canvasContext.fillText("２倍カード", 20, 300);
+    canvasContext.globalAlpha = 1;
   }
 };
 
 const drawDropKaishin = () => {
   if (dropKaishin) {
+    canvasContext.globalAlpha = DROP_DISPLAY_ALPHA;
     canvasContext.font = "30px Impact";
     canvasContext.fillStyle = "violet";
     canvasContext.fillRect(10, 320, 250, 40);
     canvasContext.fillStyle = "mediumblue";
     canvasContext.fillText("確率アップカード", 20, 350);
+    canvasContext.globalAlpha = 1;
   }
 };
 
 const drawDropChrono = () => {
   if (dropChrono) {
+    canvasContext.globalAlpha = DROP_DISPLAY_ALPHA;
     canvasContext.font = "30px Impact";
     canvasContext.fillStyle = "darkviolet";
     canvasContext.fillRect(10, 370, 250, 40);
     canvasContext.fillStyle = "white";
     canvasContext.fillText("時間停止カード", 20, 400);
+    canvasContext.globalAlpha = 1;
+  }
+};
+
+const drawDropSlotPlus = () => {
+  if (dropSlotPlus) {
+    canvasContext.globalAlpha = DROP_DISPLAY_ALPHA;
+    canvasContext.font = "30px Impact";
+    canvasContext.fillStyle = "teal";
+    canvasContext.fillRect(10, 420, 250, 40);
+    canvasContext.fillStyle = "white";
+    canvasContext.fillText("攻撃玉追加カード", 20, 450);
+    canvasContext.globalAlpha = 1;
   }
 };
 //各種情報表示処理************************************
@@ -897,6 +1019,34 @@ const playSound = (sound) => {
       >
         時を止める
       </button>
+      <div class="member-row">
+        <span>攻撃玉追加カード</span>
+        <span>{{ hasMember ? slotPlusNormal : "ー" }}</span>
+      </div>
+      <button
+        type="button"
+        class="btn btn-sm mt-1"
+        :class="
+          hasMember &&
+          slotPlusNormal > 0 &&
+          answerMode &&
+          !answerSubmitted &&
+          Number(mondaiLevel) + extraSlotsNextAttack < MAX_ATTACK_SLOTS
+            ? 'btn-success'
+            : 'btn-outline-secondary'
+        "
+        :disabled="
+          !hasMember ||
+          slotPlusNormal <= 0 ||
+          !answerMode ||
+          answerSubmitted ||
+          Number(mondaiLevel) + extraSlotsNextAttack >= MAX_ATTACK_SLOTS
+        "
+        @mousedown.prevent
+        @click="useSlotPlus"
+      >
+        玉を1つ追加
+      </button>
       <div>
         <button
           type="button"
@@ -933,9 +1083,8 @@ const playSound = (sound) => {
           <input
             ref="answerInput"
             class="answerInput form-control"
-            placeholder="答えを入力"
-            @blur="answerInputBlur()"
-            @keydown.enter="answerInput.blur()"
+            placeholder="答えを入力（Enterで送信）"
+            @keydown.enter.prevent="answerInputBlur()"
             v-model="inputedAnswer"
           />
         </div>
