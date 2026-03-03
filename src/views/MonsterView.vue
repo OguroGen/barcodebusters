@@ -484,7 +484,7 @@ const barcodeInputBlur = async () => {
   }
 
   const initialLetter = barcode.value.slice(0, 1);
-  if (initialLetter === "S" || initialLetter === "B") {
+  if (initialLetter === "B") {
     answerSubmitted.value = false; // 新しい問題なのでカード使用可能に
     answerInput.value.disabled = false;
     answerInput.value.focus();
@@ -579,16 +579,16 @@ const attack = () => {
   }
 
   //バイスル抽選（ノーマルのみ）
-  if (Math.random() < 0.6) dropItem = true;
+  if (Math.random() < 0.5) dropItem = true;
 
   //カクリア抽選（ノーマルのみ）
   if (Math.random() < 0.4) dropKaishin = true;
 
   //クロノ抽選（ノーマルのみ）
-  if (Math.random() < 0.5) dropChrono = true;
+  if (Math.random() < 0.4) dropChrono = true;
 
   // 攻撃玉追加カード抽選（20％）
-  if (Math.random() < 0.4) dropSlotPlus = true;
+  if (Math.random() < 0.6) dropSlotPlus = true;
 
   // 抽選に当たったときは生徒情報のカード数も増やす（表示＋DB）
   if (hasMember.value) {
